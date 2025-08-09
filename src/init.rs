@@ -101,6 +101,11 @@ pub fn system_init(pac: &mut Peripherals) {
     pac.RCC.apb2rstr().modify(|_, w| w.tim1rst().set_bit());
     pac.RCC.apb2rstr().modify(|_, w| w.tim1rst().clear_bit());
 
+    // TIM2 - enable and reset
+    pac.RCC.apb1enr1().modify(|_, w| w.tim2en().set_bit());
+    pac.RCC.apb1rstr1().modify(|_, w| w.tim2rst().set_bit());
+    pac.RCC.apb1rstr1().modify(|_, w| w.tim2rst().clear_bit());
+
      // TIM8 - enable and reset
     pac.RCC.apb2enr().modify(|_, w| w.tim8en().set_bit());
     pac.RCC.apb2rstr().modify(|_, w| w.tim8rst().set_bit());

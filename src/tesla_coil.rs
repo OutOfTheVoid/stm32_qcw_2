@@ -98,8 +98,10 @@ fn init_output_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
         w
             .fault1().disabled()
             .fault2().disabled()
-            .idlem1().clear_bit()
-            .idlem2().clear_bit()
+            .idlem1().set_bit()
+            .idlem2().set_bit()
+            .idles1().clear_bit()
+            .idles2().clear_bit()
             .pol1().active_high()
             .pol2().active_high()
     });
@@ -154,7 +156,6 @@ pub fn begin_open_loop(period: u16) {
         let hrtim = HRTIM_PERIPHERALS.assume_init_ref();
         hrtim.timer_c.perr().modify(|_, w| w.per().set(period));
         hrtim.timer_c.cmp1r().modify(|_, w| w.cmp().set(period / 2));
-        hrtim.common.bmcr().modify(|_, w| w.bme().set_bit());
         hrtim.timer_c.rstr().modify(|_, w| w.timbcmp1().clear_bit());
         hrtim.timer_c.cr().modify(|_, w| w.cont().set_bit());
         hrtim.common.oenr().modify(|_, w| {
@@ -169,18 +170,14 @@ pub fn begin_open_loop(period: u16) {
 pub fn stop() {
     cm_interrupt::free(|_| unsafe {
         let hrtim = HRTIM_PERIPHERALS.assume_init_ref();
-        hrtim.common.bmtrgr().modify(|_, w| w.tcrst().trigger());
+        hrtim.common.bmcr().modify(|_, w| w.bme().clear_bit());
+        hrtim.common.bmtrgr().modify(|_, w| w.tccmp1().trigger());
+        hrtim.common.bmcr().modify(|_, w| w.bme().set_bit());
         while !hrtim.common.bmcr().read().bmstat().is_burst() {}
-        hrtim.common.odisr().write(|w| {
-            w
-                .tc1odis().set_bit()
-                .tc2odis().set_bit()
-        });
         hrtim.timer_c.cr().modify(|_, w| w.cont().clear_bit());
-        hrtim.timer_c.rstr().modify(|_, w| w.timbcmp1().clear_bit());
         hrtim.master.cr().modify(|_, w| w.tccen().clear_bit());
         hrtim.common.bmcr().modify(|_, w| w.bme().clear_bit());
-        hrtim.common.bmtrgr().modify(|_, w| w.tcrst().no_effect());
+        hrtim.common.bmtrgr().modify(|_, w| w.tccmp1().no_effect());
     });
 }
 

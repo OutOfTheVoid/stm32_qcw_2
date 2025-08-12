@@ -1,19 +1,24 @@
 /*
  * PB12 : AF13 - HRTIM1_CHC1 - out +
  * PB13 : AF13 - HRTIM1_CHC2 - out -
- * PB3  : AF13 - HRTIM1_EEV9 - feedback
+ * PB5  : AF13 - HRTIM1_EEV6 - feedback
  */
 
-use core::{cell::RefCell, mem::MaybeUninit, sync::atomic::{AtomicU32, Ordering}};
+use core::{cell::RefCell, mem::MaybeUninit, sync::atomic::{AtomicBool, AtomicU32, Ordering}};
 
 use cortex_m::interrupt::{self as cm_interrupt};
 use stm32g4::stm32g474::{self, interrupt, GPIOB, GPIOC, HRTIM_COMMON, HRTIM_MASTER, HRTIM_TIMA, HRTIM_TIMB, HRTIM_TIMC, NVIC};
 
-// 320 cycles at 160 MHz gives us a max frequency of 500 kHz
-const FEEDBACK_BLANKING_INTERVAL: u16 = 320;
+// 20 cycles at 160 MHz gives us a blanking interval of 125ns
+const FEEDBACK_BLANKING_INTERVAL: u16 = 20;
 
 // 533 cycles at 160 mhz gives us a min frequency of ~300 kHz
-const FEEDBACK_VALID_INTERVAL: u16 = 533;
+const FEEDBACK_VALID_HIGH: u16 = 533;
+// 355 cycles at 160 mhz gives us a max frequency of ~450 kHz
+const FEEDBACK_VALID_LOW: u16 = 355;
+
+const FEEDBACK_DELAY_NS: u16 = 500;
+const FEEDBACK_DELAY: u16 = ((FEEDBACK_DELAY_NS as u64 * 160_000_000) / 1_000_000_000) as u16;
 
 const CKPSC_1: u8 = 0b101;
 
@@ -44,8 +49,8 @@ fn init_capture_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
     // Setup hrtim eev9 input for falling edge on PB3
     hrtim.common.eecr2().modify(|_, w| {
         w
-            .ee9sns().rising()
-            .ee9src().src1()
+            .ee6sns().falling()
+            .ee6src().src1()
     });
     hrtim.timer_a.cr().modify(|_, w| {
         w.ckpsc().set(CKPSC_1)
@@ -56,24 +61,22 @@ fn init_capture_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
             .trstu().set_bit()
             .cont().set_bit()
     });
-    hrtim.timer_a.cpt1cr().modify(|_, w| w.exev9cpt().set_bit());
+    hrtim.timer_a.cpt1cr().modify(|_, w| w.exev6cpt().set_bit());
     hrtim.timer_a.rstr().modify(|_, w| {
         w
-            .extevnt9().set_bit()
-            .cmp2().set_bit()
+            .extevnt6().set_bit()
     });
-    hrtim.timer_a.eefr2().modify(|_, w| w.ee9fltr().blank_reset_to_compare1());
+    hrtim.timer_a.eefr2().modify(|_, w| w.ee6fltr().blank_reset_to_compare1());
     hrtim.timer_a.cmp1r().modify(|_, w| w.cmp().set(FEEDBACK_BLANKING_INTERVAL));
-    hrtim.timer_a.cmp2r().modify(|_, w| w.cmp().set(FEEDBACK_VALID_INTERVAL));
     hrtim.timer_a.perr().modify(|_, w| w.per().set(0xF000));
     hrtim.timer_a.cntr().modify(|_, w| w.cnt().set(0));
     hrtim.timer_a.icr().write(|w| w.cpt1c().bit(true));
     hrtim.timer_a.dier().modify(|_, w| w.cpt1ie().set_bit());
     hrtim.master.cr().modify(|_, w| w.tacen().set_bit());
 
-    gpio_b.pupdr().modify(|_, w| w.pupdr3().pull_up());
-    gpio_b.afrl().modify(|_, w| w.afrl3().af13());
-    gpio_b.moder().modify(|_, w| w.moder3().alternate());
+    gpio_b.pupdr().modify(|_, w| w.pupdr5().pull_up());
+    gpio_b.afrl().modify(|_, w| w.afrl5().af13());
+    gpio_b.moder().modify(|_, w| w.moder5().alternate());
 }
 
 fn init_phase_timer(hrtim: &mut HrtimPeripherals) {
@@ -81,9 +84,14 @@ fn init_phase_timer(hrtim: &mut HrtimPeripherals) {
         w
             .ckpsc().set(CKPSC_1)
             .trstu().set_bit()
+            .preen().set_bit()
     });
-    hrtim.timer_b.rstr().modify(|_, w| { w.extevnt9().set_bit()});
-    hrtim.timer_b.perr().modify(|_, w| w.per().set(100));
+    hrtim.timer_b.eefr2().modify(|_, w| w.ee6fltr().blank_reset_to_compare1());
+    hrtim.timer_b.rstr().modify(|_, w| w.extevnt6().set_bit());
+    hrtim.timer_b.cmp1r().modify(|_, w| w.cmp().set(FEEDBACK_BLANKING_INTERVAL));
+    hrtim.timer_b.perr().modify(|_, w| w.per().set(0xF000));
+    hrtim.timer_b.cntr().write(|w| w.cnt().set(0));
+    hrtim.master.cr().modify(|_, w| w.tbcen().set_bit());
 }
 
 fn init_output_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
@@ -92,6 +100,7 @@ fn init_output_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
             .ckpsc().set(CKPSC_1)
             .trstu().set_bit()
             .cont().set_bit()
+            .retrig().set_bit()
             .preen().set_bit()
     });
     hrtim.timer_c.outr().modify(|_, w| {
@@ -111,7 +120,7 @@ fn init_output_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
     hrtim.timer_c.set2r().modify(|_, w| w.cmp1().set_active());
     hrtim.timer_c.perr().modify(|_, w| w.per().set(0xE000));
     hrtim.timer_c.cmp1r().modify(|_, w| w.cmp().set(0x7000));
-
+    hrtim.timer_c.rstr().modify(|_, w| w.timbcmp2().set_bit());
 
     hrtim.common.bmcr().modify(|_, w| {
         w
@@ -151,12 +160,13 @@ fn init_output_timer(hrtim: &mut HrtimPeripherals, gpio_b: &mut GPIOB) {
     });
 }
 
-pub fn begin_open_loop(period: u16) {
+pub fn start_open_loop(period: u16) {
+    FEEDBACK_ENABLED.store(false, Ordering::Release);
+    FEEDBACK_INITIALIZED.store(false, Ordering::Release);
     cm_interrupt::free(|_| unsafe {
         let hrtim = HRTIM_PERIPHERALS.assume_init_ref();
         hrtim.timer_c.perr().modify(|_, w| w.per().set(period));
         hrtim.timer_c.cmp1r().modify(|_, w| w.cmp().set(period / 2));
-        hrtim.timer_c.rstr().modify(|_, w| w.timbcmp1().clear_bit());
         hrtim.timer_c.cr().modify(|_, w| w.cont().set_bit());
         hrtim.common.oenr().modify(|_, w| {
             w
@@ -167,6 +177,16 @@ pub fn begin_open_loop(period: u16) {
     });
 }
 
+static FEEDBACK_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn continue_closed_loop() {
+    FEEDBACK_ENABLED.store(true, Ordering::Release);
+}
+
+pub fn check_closed_loop_operational() -> bool {
+    FEEDBACK_INITIALIZED.load(Ordering::Acquire)
+}
+
 pub fn stop() {
     cm_interrupt::free(|_| unsafe {
         let hrtim = HRTIM_PERIPHERALS.assume_init_ref();
@@ -174,8 +194,11 @@ pub fn stop() {
         hrtim.common.bmtrgr().modify(|_, w| w.tccmp1().trigger());
         hrtim.common.bmcr().modify(|_, w| w.bme().set_bit());
         while !hrtim.common.bmcr().read().bmstat().is_burst() {}
-        hrtim.timer_c.cr().modify(|_, w| w.cont().clear_bit());
-        hrtim.master.cr().modify(|_, w| w.tccen().clear_bit());
+        hrtim.master.cr().modify(|_, w| {
+            w
+                .tccen().clear_bit()
+                .tbcen().clear_bit()
+        });
         hrtim.common.bmcr().modify(|_, w| w.bme().clear_bit());
         hrtim.common.bmtrgr().modify(|_, w| w.tccmp1().no_effect());
     });
@@ -183,6 +206,7 @@ pub fn stop() {
 
 const FREQ_SAMPLE_NONE: u32 = 0x8000_0000;
 static FREQ_SAMPLE: AtomicU32 = AtomicU32::new(FREQ_SAMPLE_NONE);
+static FEEDBACK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 pub fn poll_feedback_period() -> Option<u16> {
     let value = FREQ_SAMPLE.swap(FREQ_SAMPLE_NONE, Ordering::SeqCst);
@@ -203,10 +227,57 @@ pub fn read_feedback_period_raw() -> u16 {
 #[interrupt]
 unsafe fn HRTIM_TIMA_IRQN() {
     let hrtim = unsafe { HRTIM_PERIPHERALS.assume_init_mut() };
+
     if hrtim.timer_a.isr().read().cpt1().bit_is_set() {
         hrtim.timer_a.icr().write(|w| w.cpt1c().bit(true));
-        let value = hrtim.timer_a.cpt1r().read().cpt().bits();
-        FREQ_SAMPLE.store(value as u32, Ordering::SeqCst);
+
+        let period = hrtim.timer_a.cpt1r().read().cpt().bits();
+
+        if (FEEDBACK_VALID_LOW..=FEEDBACK_VALID_HIGH).contains(&period) {
+            if FEEDBACK_ENABLED.load(Ordering::Acquire) {
+                hrtim.common.cr1().modify(|_, w| {
+                    w
+                        .tcudis().set_bit()
+                        .tbudis().set_bit()
+                });
+                if !FEEDBACK_INITIALIZED.load(Ordering::Acquire) {
+
+                    hrtim.timer_c.cmp1r().modify(|_, w| w.cmp().set(period / 2));
+                    hrtim.timer_b.cmp2r().modify(|_, w| w.cmp().set(period / 2 - 0));
+                    hrtim.common.cr1().modify(|_, w| {
+                        w
+                            .tcudis().clear_bit()
+                            .tbudis().clear_bit()
+                    });
+                    hrtim.timer_c.cr().modify(|_, w| w.cont().clear_bit());
+                    hrtim.common.cr2().modify(|_, w| {
+                        w
+                            .tbrst().set_bit()
+                            .tbswu().set_bit()
+                            .tcswu().set_bit()
+                    });
+                    hrtim.master.cr().modify(|_, w| w.tbcen().set_bit());
+
+                    FEEDBACK_INITIALIZED.store(true, Ordering::Release);
+                } else {
+                    hrtim.timer_c.cmp1r().modify(|_, w| w.cmp().set(period / 2));
+                    hrtim.timer_b.cmp2r().modify(|_, w| w.cmp().set(period / 2 - FEEDBACK_DELAY));
+                    hrtim.common.cr1().modify(|_, w| {
+                        w
+                            .tcudis().clear_bit()
+                            .tbudis().clear_bit()
+                    });
+                    hrtim.common.cr2().modify(|_, w| {
+                        w
+                            .tbswu().set_bit()
+                            .tcswu().set_bit()
+                    });
+                }
+                
+                // apply feedback
+            }
+            FREQ_SAMPLE.store(period as u32, Ordering::SeqCst);
+        }
     }
 }
 

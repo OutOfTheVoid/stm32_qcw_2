@@ -57,6 +57,10 @@ unsafe fn main() -> ! {
     };
 
     time::init(tim_2);
+
+    let mut start = time::get_time_ms();
+    while (get_time_ms() - start) < 500 {}
+
     debug_led::setup(&mut gpio_c);
     gate_driver_supply_inverter::init(&mut gpio_a, &mut tim_1);
     buck_converter::init(&mut gpio_b, &mut tim_8);
@@ -64,22 +68,35 @@ unsafe fn main() -> ! {
 
     unsafe { cortex_m::interrupt::enable() };
 
-    let period = 160_000_000 / 400_000;
+    let mut period = (160_000_000 / 440_000) as u16;
+
+    buck_converter::set_level(1.0, &mut tim_8);
 
     loop {
+        //if let Some(new_period) = tesla_coil::poll_feedback_period() {
+        //    period = new_period;
+        //}
+
         let mut start = time::get_time_us();
 
-        tesla_coil::begin_open_loop(period as u16);
-        debug_led::set(&mut gpio_c, true);
+        tesla_coil::start_open_loop(period as u16);
 
-        while (get_time_us() - start) < 10 {}
+        while (get_time_us() - start) < 50 {}
+        start = time::get_time_us();
 
+        tesla_coil::continue_closed_loop();
+
+        while (get_time_us() - start) < 3950 {
+            if tesla_coil::check_closed_loop_operational() {
+                debug_led::set(&mut gpio_c, true);
+            }
+        }
         start = time::get_time_us();
 
         tesla_coil::stop();
         debug_led::set(&mut gpio_c, false);
 
-        while (get_time_us() - start) < 9990 {}
+        while (get_time_us() - start) < 96_000 {}
 
     }
 }

@@ -6,7 +6,7 @@
 use stm32g4::stm32g474::{Peripherals, GPIOB, TIM8};
 
 const DEADTIME: u32 = 200;
-const PERIOD: u32 = 170_000_000 / 30_000;
+const PERIOD: u32 = 160_000_000 / 30_000;
 const PERIOD_MINUS_DEADTIME: u32 = PERIOD - DEADTIME;
 
 pub fn init(gpio_b: &mut GPIOB, tim_8: &mut TIM8) {

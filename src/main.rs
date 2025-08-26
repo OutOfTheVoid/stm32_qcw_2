@@ -18,7 +18,13 @@ mod time;
 
 use init::*;
 
-use crate::{tesla_coil::HrtimPeripherals, time::{get_time_ms, get_time_us}};
+use crate::{time::{get_time_ms, get_time_us}};
+
+const RAMP_START_POWER : f32 =     0.1;
+const RAMP_DEPTH       : f32 =     0.9;
+const RAMP_TIME_US     : u64 =   10_000;
+const COOLDOWN_TIME_US : u64 =     1000;
+const OFF_TIME_US      : u64 = 800_000 - RAMP_TIME_US - COOLDOWN_TIME_US;
 
 #[entry]
 unsafe fn main() -> ! {
@@ -32,12 +38,6 @@ unsafe fn main() -> ! {
         TIM1         : mut tim_1,
         TIM2         : mut tim_2,
         TIM8         : mut tim_8,
-        HRTIM_COMMON : mut hrtim_common,
-        HRTIM_MASTER : mut hrtim_master,
-        HRTIM_TIMA   : mut hrtim_tima,
-        HRTIM_TIMB   : mut hrtim_timb,
-        HRTIM_TIMC   : mut hrtim_timc,
-        
         ..
     } = pac;
 
@@ -48,14 +48,6 @@ unsafe fn main() -> ! {
         ..
     } = core_pac;
 
-    let hrtim = HrtimPeripherals {
-        common: hrtim_common,
-        master: hrtim_master,
-        timer_a: hrtim_tima,
-        timer_b: hrtim_timb,
-        timer_c: hrtim_timc
-    };
-
     time::init(tim_2);
 
     let mut start = time::get_time_ms();
@@ -64,39 +56,43 @@ unsafe fn main() -> ! {
     debug_led::setup(&mut gpio_c);
     gate_driver_supply_inverter::init(&mut gpio_a, &mut tim_1);
     buck_converter::init(&mut gpio_b, &mut tim_8);
-    tesla_coil::init(&mut gpio_b, &mut gpio_c, hrtim);
+    tesla_coil::init(&mut gpio_b);
 
     unsafe { cortex_m::interrupt::enable() };
 
-    let mut period = (160_000_000 / 440_000) as u16;
-
-    buck_converter::set_level(1.0, &mut tim_8);
+    let mut start = time::get_time_us();
 
     loop {
-        //if let Some(new_period) = tesla_coil::poll_feedback_period() {
-        //    period = new_period;
-        //}
+        buck_converter::set_level(RAMP_START_POWER, &mut tim_8);
 
-        let mut start = time::get_time_us();
-
-        tesla_coil::start_open_loop(period as u16);
-
-        while (get_time_us() - start) < 50 {}
         start = time::get_time_us();
 
-        tesla_coil::continue_closed_loop();
+        tesla_coil::enable(&mut gpio_b);
+        debug_led::set(&mut gpio_c, true);
 
-        while (get_time_us() - start) < 3950 {
-            if tesla_coil::check_closed_loop_operational() {
-                debug_led::set(&mut gpio_c, true);
+        loop {
+            let t = get_time_us() - start;
+            buck_converter::set_level(RAMP_START_POWER + RAMP_DEPTH * (t as f32 / RAMP_TIME_US as f32), &mut tim_8);
+            if t >= RAMP_TIME_US {
+                break;
             }
         }
-        start = time::get_time_us();
 
-        tesla_coil::stop();
+        buck_converter::set_level(0.0, &mut tim_8);
+
+        start = time::get_time_us();
+        loop {
+            let t = get_time_us() - start;
+            if t >= COOLDOWN_TIME_US {
+                break;
+            }
+        }
+
+        tesla_coil::disable(&mut gpio_b);
         debug_led::set(&mut gpio_c, false);
 
-        while (get_time_us() - start) < 96_000 {}
+        start = time::get_time_us();
+        while (get_time_us() - start) < OFF_TIME_US {}
 
     }
 }

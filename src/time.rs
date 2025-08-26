@@ -14,9 +14,11 @@ pub fn init(mut timer_2: TIM2) {
         let timer_2 = TIMER_2.assume_init_mut();
         timer_2.arr().modify(|_, w| w.arr().set(160_000_000 - 1));
         timer_2.cnt().write(|w| w.cnt().set(0));
+        timer_2.egr().write(|w| w.ug().set_bit());
         timer_2.dier().modify(|_, w| w.uie().set_bit());
         timer_2.psc().modify(|_, w| w.psc().set(0));
         timer_2.sr().modify(|_, w| w.uif().clear());
+        timer_2.cr1().modify(|_, w| w.urs().any_event());
         NVIC::unmask(Interrupt::TIM2);
         timer_2.cr1().modify(|_, w| w.cen().set_bit());
     };
@@ -50,6 +52,6 @@ pub fn get_time_seconds() -> f64 {
 
 #[interrupt]
 unsafe fn TIM2() {
-    ROLLOVER_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
     TIMER_2.assume_init_mut().sr().modify(|_, w| w.uif().clear());
+    ROLLOVER_COUNT.fetch_add(1, atomic::Ordering::AcqRel);
 }

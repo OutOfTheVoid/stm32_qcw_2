@@ -3,11 +3,14 @@
 #![allow(static_mut_refs)]
 #![allow(unused)]
 
+use core::f32;
+
 use cortex_m::asm::{self, wfi};
 use cortex_m_rt::entry;
 use panic_halt as _;
-use stm32g4::stm32g474::{self as pac, hrtim_timc};
+use stm32g4::stm32g474::{self as pac, hrtim_timc, GPIOB, GPIOC, TIM8};
 use pac::Peripherals;
+use libm::cosf;
 
 mod init;
 mod debug_led;
@@ -18,7 +21,15 @@ mod time;
 
 use init::*;
 
-use crate::{tesla_coil::HrtimPeripherals, time::{get_time_ms, get_time_us}};
+use crate::{time::{get_time_ms, get_time_us}};
+
+const RAMP_START_POWER : f32 =      0.1;
+const RAMP_DEPTH       : f32 =      0.9;
+const MODULATION_DEPTH : f32 =      0.0;
+const RAMP_TIME_US     : u64 =    8_000;
+const COOLDOWN_TIME_US : u64 =    1_000;
+const OFF_TIME_US      : u64 =  400_000 - RAMP_TIME_US - COOLDOWN_TIME_US;
+const PAUSE_TIME_US    : u64 = 2000_000;
 
 #[entry]
 unsafe fn main() -> ! {
@@ -32,12 +43,6 @@ unsafe fn main() -> ! {
         TIM1         : mut tim_1,
         TIM2         : mut tim_2,
         TIM8         : mut tim_8,
-        HRTIM_COMMON : mut hrtim_common,
-        HRTIM_MASTER : mut hrtim_master,
-        HRTIM_TIMA   : mut hrtim_tima,
-        HRTIM_TIMB   : mut hrtim_timb,
-        HRTIM_TIMC   : mut hrtim_timc,
-        
         ..
     } = pac;
 
@@ -48,14 +53,6 @@ unsafe fn main() -> ! {
         ..
     } = core_pac;
 
-    let hrtim = HrtimPeripherals {
-        common: hrtim_common,
-        master: hrtim_master,
-        timer_a: hrtim_tima,
-        timer_b: hrtim_timb,
-        timer_c: hrtim_timc
-    };
-
     time::init(tim_2);
 
     let mut start = time::get_time_ms();
@@ -63,40 +60,50 @@ unsafe fn main() -> ! {
 
     debug_led::setup(&mut gpio_c);
     gate_driver_supply_inverter::init(&mut gpio_a, &mut tim_1);
-    buck_converter::init(&mut gpio_b, &mut tim_8);
-    tesla_coil::init(&mut gpio_b, &mut gpio_c, hrtim);
-
-    unsafe { cortex_m::interrupt::enable() };
-
-    let mut period = (160_000_000 / 440_000) as u16;
-
-    buck_converter::set_level(1.0, &mut tim_8);
+    buck_converter::init(&mut gpio_a, &mut gpio_c, &mut tim_8);
+    tesla_coil::init(&mut gpio_c);
 
     loop {
-        //if let Some(new_period) = tesla_coil::poll_feedback_period() {
-        //    period = new_period;
-        //}
-
-        let mut start = time::get_time_us();
-
-        tesla_coil::start_open_loop(period as u16);
-
-        while (get_time_us() - start) < 50 {}
-        start = time::get_time_us();
-
-        tesla_coil::continue_closed_loop();
-
-        while (get_time_us() - start) < 3950 {
-            if tesla_coil::check_closed_loop_operational() {
-                debug_led::set(&mut gpio_c, true);
-            }
-        }
-        start = time::get_time_us();
-
-        tesla_coil::stop();
+        debug_led::set(&mut gpio_c, true);
+        fire(
+            10000, 
+            |t, _| {
+                if t < 7000 {
+                    t as f32 * 0.5 / 7000f32 + 0.1
+                } else if t < 8000 {
+                    (t - 7000) as f32 * 0.4 / 1000f32 + 0.6
+                } else {
+                    (10000 - t) as f32 / 2000f32
+                }
+            },
+            &mut tim_8,
+            &mut gpio_c
+        );
         debug_led::set(&mut gpio_c, false);
-
-        while (get_time_us() - start) < 96_000 {}
-
+        let start = time::get_time_ms();
+        while time::get_time_ms() - start < 490 {}
     }
+}
+
+fn fire<F: Fn(u32, f32) -> f32>(ontime_us: u32, ramp_fn: F, tim_8: &mut TIM8, gpio_c: &mut GPIOC) {
+    buck_converter::set_level(ramp_fn(0, 0.0), tim_8);
+    let mut start = time::get_time_us();
+    loop {
+        if (time::get_time_us() - start) >= 300 {
+            break;
+        }
+    }
+    tesla_coil::enable(gpio_c);
+    start = time::get_time_us();
+    loop {
+        let t = time::get_time_us() - start;
+        let level = ramp_fn(t as u32, t as f32 / ontime_us as f32);
+        buck_converter::set_level(level, tim_8);
+        if t >= ontime_us as u64 {
+            break;
+        }
+    }
+    tesla_coil::disable(gpio_c);
+    buck_converter::set_level(0.0, tim_8);
+
 }
